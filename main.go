@@ -50,6 +50,13 @@ type serverManager []struct {
 	User_id string `json:"user_id"`
 }
 
+type IPInfoResponse struct {
+	IP     string `json:"ip"`
+	City   string `json:"city"`
+	Region string `json:"region"`
+	ISP    string `json:"org"`
+}
+
 var (
 	i, j                 int    = 0, 0 // циклы: j - перебор серверов; i - перебор сессий
 	serverName           string        //
@@ -58,7 +65,7 @@ var (
 )
 
 const (
-	newTitle = "Drova INFO" // Имя окна программы
+	newTitle = "Drova Session INFO" // Имя окна программы
 
 )
 
@@ -218,6 +225,7 @@ func main() {
 			}
 
 			// собираем инфу по IP
+
 			ip := net.ParseIP(data.Sessions[i].Creator_ip)
 			asnRecord, err := getASNRecord(ip)
 			if err != nil {
@@ -230,6 +238,11 @@ func main() {
 
 			asn := asnRecord.AutonomousSystemOrganization // провайдер клиента
 			city := cityRecord.City.Names["ru"]           // город клиента
+
+			if city == "" {
+				city, asn = ipInf(data.Sessions[i].Creator_ip)
+				time.Sleep(1 * time.Second)
+			}
 			// записываем данные по сессии
 			writer.Write([]string{serverName, game, data.Sessions[i].Creator_ip, city, asn, data.Sessions[i].Client_id, data.Sessions[i].Status, sessionOn, sessionOff, sessionDur, comment, data.Sessions[i].Billing_type, ""})
 			i++
@@ -397,4 +410,22 @@ func getCityRecord(ip net.IP) (*CityRecord, error) {
 	}
 
 	return &record, nil
+}
+
+func ipInf(ip string) (string, string) {
+	apiURL := fmt.Sprintf("https://ipinfo.io/%s/json", ip)
+
+	resp, err := http.Get(apiURL)
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer resp.Body.Close()
+
+	var ipInfo IPInfoResponse
+	err = json.NewDecoder(resp.Body).Decode(&ipInfo)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	return ipInfo.City, ipInfo.ISP
 }
