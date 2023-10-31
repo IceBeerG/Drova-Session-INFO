@@ -237,7 +237,7 @@ func main() {
 			}
 
 			asn := asnRecord.AutonomousSystemOrganization // провайдер клиента
-			city := cityRecord.City.Names["ru"]           // город клиента
+			city := cityRecord.City.Names["en"]           // город клиента
 
 			if city == "" {
 				city, asn = ipInf(data.Sessions[i].Creator_ip)
