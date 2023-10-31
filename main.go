@@ -20,7 +20,6 @@ import (
 	"unsafe"
 
 	"github.com/oschwald/maxminddb-golang" // данные по IP
-	"golang.org/x/text/encoding/charmap"   // для смены кодировки
 )
 
 // структура для выгрузки информации по сессиям
@@ -160,7 +159,7 @@ func main() {
 	}
 	defer csvFile.Close()
 	// Создание CSV-райтера
-	writer := csv.NewWriter(charmap.Windows1251.NewEncoder().Writer(csvFile)) // кодировка win1251 для кириллицы
+	writer := csv.NewWriter(csvFile)
 	defer writer.Flush()
 
 	// Запись заголовков столбцов в CSV
@@ -205,8 +204,6 @@ func main() {
 		json.Unmarshal([]byte(responseString), &data) // декодируем JSON файл
 
 		fmt.Println(serverName)
-		// total := len(data.Sessions)
-		// fmt.Println(total)
 
 		i = 0
 		for range data.Sessions {
@@ -237,7 +234,7 @@ func main() {
 			}
 
 			asn := asnRecord.AutonomousSystemOrganization // провайдер клиента
-			city := cityRecord.City.Names["en"]           // город клиента
+			city := cityRecord.City.Names["ru"]           // город клиента
 
 			if city == "" {
 				city, asn = ipInf(data.Sessions[i].Creator_ip)
