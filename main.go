@@ -141,7 +141,7 @@ func main() {
 		serverID := regGet(regFolder, "last_server") // получаем ID сервера
 		regFolder += `\servers\` + serverID
 		authToken = regGet(regFolder, "auth_token") // получаем токен для авторизации
-		log.Println(authToken)
+		// log.Println(authToken)
 	} else {
 		authToken, _ = keyValFile("token", fileConfig) //  получаем токен
 	}
