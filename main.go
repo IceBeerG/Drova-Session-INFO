@@ -11,6 +11,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strconv"
@@ -20,18 +21,29 @@ import (
 	"unsafe"
 
 	"github.com/oschwald/maxminddb-golang" // данные по IP
+	"golang.org/x/sys/windows/registry"
 )
+
+type Release struct {
+	PublishedAt time.Time `json:"published_at"`
+}
 
 // структура для выгрузки информации по сессиям
 type SessionsData struct {
 	Sessions []struct {
+		Id            int32  `json:"id"`
+		Uuid          string `json:"uuid"`
 		Client_id     string `json:"client_id"`
+		Server_id     string `json:"server_id"`
 		Product_id    string `json:"product_id"`
 		Created_on    int64  `json:"created_on"`
 		Finished_on   int64  `json:"finished_on"` //or null
 		Status        string `json:"status"`
 		Creator_ip    string `json:"creator_ip"`
 		Abort_comment string `json:"abort_comment"` //or null
+		Score         string `json:"score"`         //or null
+		Score_reason  string `json:"score_reason"`  //or null
+		Comment       string `json:"score_text"`    //or null
 		Billing_type  string `json:"billing_type"`  // or null
 	}
 }
@@ -57,10 +69,10 @@ type IPInfoResponse struct {
 }
 
 var (
-	i, j                 int    = 0, 0 // циклы: j - перебор серверов; i - перебор сессий
-	serverName           string        //
-	kernel32             = syscall.NewLazyDLL("kernel32.dll")
-	procSetConsoleTitleW = kernel32.NewProc("SetConsoleTitleW")
+	i, j                          int    = 0, 0 // циклы: j - перебор серверов; i - перебор сессий
+	serverName, mmdbASN, mmdbCity string        //
+	kernel32                      = syscall.NewLazyDLL("kernel32.dll")
+	procSetConsoleTitleW          = kernel32.NewProc("SetConsoleTitleW")
 )
 
 const (
@@ -68,27 +80,24 @@ const (
 
 )
 
-// для получения провайдера
+// для получения провайдера в оффлайн базе
 type ASNRecord struct {
-	AutonomousSystemNumber       uint32 `maxminddb:"autonomous_system_number"`
 	AutonomousSystemOrganization string `maxminddb:"autonomous_system_organization"`
 }
 
-// для получения города
+// для получения города региона в оффлайн базе
 type CityRecord struct {
 	City struct {
 		Names map[string]string `maxminddb:"names"`
 	} `maxminddb:"city"`
-	Country struct {
+	Subdivision []struct {
 		Names map[string]string `maxminddb:"names"`
-	} `maxminddb:"country"`
-	Location struct {
-		Latitude  float64 `maxminddb:"latitude"`
-		Longitude float64 `maxminddb:"longitude"`
-	} `maxminddb:"location"`
+	} `maxminddb:"subdivisions"`
 }
 
 func main() {
+	var authToken string
+
 	// Получаем текущую директорию программы
 	dir, err := filepath.Abs(filepath.Dir(os.Args[0]))
 	if err != nil {
@@ -97,6 +106,16 @@ func main() {
 
 	logFilePath := "errors.log" // Имя файла для логирования
 	logFilePath = filepath.Join(dir, logFilePath)
+	mmdbASN = filepath.Join(dir, "GeoLite2-ASN.mmdb")   // файл оффлайн базы IP. Провайдер
+	mmdbCity = filepath.Join(dir, "GeoLite2-City.mmdb") // файл оффлайн базы IP. Город и область
+
+	_, err = os.Stat(mmdbASN)
+	if os.IsNotExist(err) {
+		// Файл не существует
+		log.Printf("[INFO] Файл %s отсутствует\n", mmdbASN)
+	} else {
+		updateGeoLite(mmdbASN, mmdbASN)
+	}
 
 	// Открываем файл для записи логов
 	logFile, err := os.OpenFile(logFilePath, os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0644)
@@ -113,8 +132,21 @@ func main() {
 	gameID() // получение списка ID игры - Название игры и сохранение в файл gamesID.txt
 
 	// Указываем файл с токеном
-	config := filepath.Join(dir, "config.txt")
-	authToken, _ := keyValFile("token", config)                  //  получаем токен
+	fileConfig := filepath.Join(dir, "config.txt")
+	_, err = os.Stat(fileConfig)
+	if os.IsNotExist(err) {
+		// Файл не существует
+		log.Printf("[INFO] Файл %s отсутствует\n", fileConfig)
+		regFolder := `SOFTWARE\ITKey\Esme`
+		serverID := regGet(regFolder, "last_server") // получаем ID сервера
+		regFolder += `\servers\` + serverID
+		authToken = regGet(regFolder, "auth_token") // получаем токен для авторизации
+		log.Println(authToken)
+	} else {
+		authToken, _ = keyValFile("token", fileConfig) //  получаем токен
+	}
+
+	// authToken := "c906fd81-d613-4b0e-9e68-6715076a654d"
 	url1 := "https://services.drova.io/server-manager/servers"   // для получения ID и имени сервера
 	url2 := "https://services.drova.io/session-manager/sessions" // для выгрузки сессий
 
@@ -163,8 +195,8 @@ func main() {
 	defer writer.Flush()
 
 	// Запись заголовков столбцов в CSV
-	writer.Write([]string{"Станция", "Игра", "IP Клиента", "Город", "Провайдер", "КлиентID", "Статус",
-		"Начало сессии", "Конец сессии", "Продолжительность", "Комментарий", "Способ оплаты"})
+	writer.Write([]string{"ID сессии", "Станция", "Игра", "IP Клиента", "Город", "Регион", "Провайдер", "КлиентID", "Статус",
+		"Начало сессии", "Конец сессии", "Продолжительность", "Продолжительность UNIX", "Abort_comment", "Score", "Score_reason", "Комментарий", "Способ оплаты"})
 
 	// цикл для получения имени и ID всех серверов
 	for range serv {
@@ -206,45 +238,51 @@ func main() {
 		fmt.Println(serverName)
 
 		i = 0
+		z := 0
 		for range data.Sessions {
-			var sessionOff, sessionDur string = "", ""
-			comment := strings.ReplaceAll(data.Sessions[i].Abort_comment, ";", ":")
+			var sessionOff, sessionDur, sessionDurUnix string = "", "", ""
+			var city, region, asn string = "", "", ""
+
+			comment := strings.ReplaceAll(data.Sessions[i].Comment, `,`, ".")
+			comment = strings.ReplaceAll(comment, "\n", "")
 			sessionOn, _ := dateTimeS(data.Sessions[i].Created_on)
 			game, _ := keyValFile(data.Sessions[i].Product_id, "gamesID.txt")
+			idsession := data.Sessions[i].Uuid
 
 			if data.Sessions[i].Status == "ACTIVE" {
 				sessionOff = "session Active" // если сессия активна, так и пишем
+				sessionDur = "session Active"
+				sessionDurUnix = "session Active"
 			} else { // иначе, записываем значение окончания сессии и высчитываем продолжительность сессии
 				sessionOff, _ = dateTimeS(data.Sessions[i].Finished_on)
 				_, stopTime := dateTimeS(data.Sessions[i].Finished_on)
 				_, startTime := dateTimeS(data.Sessions[i].Created_on)
 				sessionDur = dur(stopTime, startTime)
+				sessionDurU := data.Sessions[i].Finished_on - data.Sessions[i].Created_on
+				sessionDurUnix = strconv.FormatInt((sessionDurU), 10)
 			}
 
-			// собираем инфу по IP
+			_, err = os.Stat(mmdbASN)
+			if !os.IsNotExist(err) {
+				city, region, asn = offlineDBip(data.Sessions[i].Creator_ip)
 
-			ip := net.ParseIP(data.Sessions[i].Creator_ip)
-			asnRecord, err := getASNRecord(ip)
-			if err != nil {
-				log.Fatal(err)
-			}
-			cityRecord, err := getCityRecord(ip)
-			if err != nil {
-				log.Fatal(err)
+			} else if os.IsNotExist(err) && z != 0 {
+				// Файл не существует
+				log.Printf("[INFO] Файл %s отсутствует\n", fileConfig)
+				z++
 			}
 
-			asn := asnRecord.AutonomousSystemOrganization // провайдер клиента
-			city := cityRecord.City.Names["ru"]           // город клиента
-
-			if city == "" {
-				city, asn = ipInf(data.Sessions[i].Creator_ip)
-				time.Sleep(1 * time.Second)
-			}
+			clientIP := data.Sessions[i].Creator_ip
+			clientID := data.Sessions[i].Client_id
+			status := data.Sessions[i].Status
+			billing := data.Sessions[i].Billing_type
+			a_comment := strings.ReplaceAll(data.Sessions[i].Abort_comment, ";", ":")
+			score := data.Sessions[i].Score
+			score_r := data.Sessions[i].Score_reason
 			// записываем данные по сессии
-			writer.Write([]string{serverName, game, data.Sessions[i].Creator_ip, city, asn, data.Sessions[i].Client_id, data.Sessions[i].Status, sessionOn, sessionOff, sessionDur, comment, data.Sessions[i].Billing_type, ""})
+			writer.Write([]string{idsession, serverName, game, clientIP, city, region, asn, clientID, status, sessionOn, sessionOff, sessionDur, sessionDurUnix, a_comment, score, score_r, comment, billing})
 			i++
 			fmt.Println(serverName, " - ", i)
-			// time.Sleep(1 * time.Millisecond)
 		}
 		j++
 	}
@@ -369,60 +407,212 @@ func setConsoleTitle(title string) {
 	_, _, _ = procSetConsoleTitleW.Call(uintptr(unsafe.Pointer(ptrTitle)))
 }
 
+// offline инфо по IP
+func getASNRecord(mmdbCity, mmdbASN string, ip net.IP) (*CityRecord, *ASNRecord, error) {
+	dbASN, err := maxminddb.Open(mmdbASN)
+	if err != nil {
+		return nil, nil, err
+	}
+	defer dbASN.Close()
+
+	var recordASN ASNRecord
+	err = dbASN.Lookup(ip, &recordASN)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	db, err := maxminddb.Open(mmdbCity)
+	if err != nil {
+		return nil, nil, err
+	}
+	defer db.Close()
+
+	var recordCity CityRecord
+	err = db.Lookup(ip, &recordCity)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	var Subdivision CityRecord
+	err = db.Lookup(ip, &Subdivision)
+	if err != nil {
+		return nil, nil, err
+	}
+	return &recordCity, &recordASN, err
+}
+
+// полученные данных из оффлайн базы
+func offlineDBip(ip string) (city, region, asn string) {
+	cityRecord, asnRecord, err := getASNRecord(mmdbCity, mmdbASN, net.ParseIP(ip))
+	if err != nil {
+		log.Println(err)
+	}
+
+	asn = asnRecord.AutonomousSystemOrganization // провайдер клиента
+	if err != nil {
+		log.Println(err, getLine())
+		asn = ""
+	}
+
+	if val, ok := cityRecord.City.Names["ru"]; ok { // город клиента
+		city = val
+		if err != nil {
+			log.Println(err, getLine())
+			city = ""
+		}
+	} else {
+		if val, ok := cityRecord.City.Names["en"]; ok {
+			city = val
+			if err != nil {
+				log.Println(err, getLine())
+				city = ""
+			}
+		}
+	}
+
+	if len(cityRecord.Subdivision) > 0 {
+		if val, ok := cityRecord.Subdivision[0].Names["ru"]; ok { // регион клиента
+			region = val
+			if err != nil {
+				log.Println(err, getLine())
+				region = ""
+			}
+		} else {
+			if val, ok := cityRecord.Subdivision[0].Names["en"]; ok {
+				region = val
+				if err != nil {
+					log.Println(err, getLine())
+					region = ""
+				}
+			}
+		}
+	}
+
+	return city, region, asn
+}
+
+// получаем данные из реестра
+func regGet(regFolder, keys string) string {
+	key, err := registry.OpenKey(registry.LOCAL_MACHINE, regFolder, registry.QUERY_VALUE)
+	if err != nil {
+		log.Printf("Failed to open registry key: %v. %s\n", err, getLine())
+	}
+	defer key.Close()
+
+	value, _, err := key.GetStringValue(keys)
+	if err != nil {
+		log.Printf("Failed to read last_server value: %v. %s\n", err, getLine())
+	}
+
+	return value
+}
+
 // получение строки кода где возникла ошибка
-func getLine() int {
+func getLine() string {
 	_, _, line, _ := runtime.Caller(1)
-	return line
+	lineErr := fmt.Sprintf("\nОшибка в строке: %d", line)
+	return lineErr
 }
 
-// инфо по IP - провайдер
-func getASNRecord(ip net.IP) (*ASNRecord, error) {
-	db, err := maxminddb.Open("GeoLite2-ASN.mmdb")
-	if err != nil {
-		return nil, err
+func updateGeoLite(mmdbASN, mmdbCity string) {
+	asnURL := "https://github.com/P3TERX/GeoLite.mmdb/raw/download/GeoLite2-ASN.mmdb"
+	cityURL := "https://github.com/P3TERX/GeoLite.mmdb/raw/download/GeoLite2-City.mmdb"
+	z := downloadAndReplaceFileIfNeeded(asnURL, mmdbASN)
+	z += downloadAndReplaceFileIfNeeded(cityURL, mmdbCity)
+	if z > 0 {
+		log.Println("[INFO] Перезапуск приложения")
+		restart()
 	}
-	defer db.Close()
-
-	var record ASNRecord
-	err = db.Lookup(ip, &record)
-	if err != nil {
-		return nil, err
-	}
-
-	return &record, nil
 }
 
-// инфо по IP - город
-func getCityRecord(ip net.IP) (*CityRecord, error) {
-	db, err := maxminddb.Open("GeoLite2-City.mmdb")
+func downloadAndReplaceFileIfNeeded(url, filename string) int8 {
+	var z int8 = 0
+	time.Sleep(2 * time.Second)
+	resp, err := http.Get("https://api.github.com/repos/P3TERX/GeoLite.mmdb/releases/latest")
 	if err != nil {
-		return nil, err
-	}
-	defer db.Close()
-
-	var record CityRecord
-	err = db.Lookup(ip, &record)
-	if err != nil {
-		return nil, err
-	}
-
-	return &record, nil
-}
-
-func ipInf(ip string) (string, string) {
-	apiURL := fmt.Sprintf("https://ipinfo.io/%s/json", ip)
-
-	resp, err := http.Get(apiURL)
-	if err != nil {
-		log.Fatal(err)
+		log.Println("[ERROR] Ошибка: ", err, getLine())
+		restart()
 	}
 	defer resp.Body.Close()
 
-	var ipInfo IPInfoResponse
-	err = json.NewDecoder(resp.Body).Decode(&ipInfo)
+	var release Release
+	err = json.NewDecoder(resp.Body).Decode(&release)
 	if err != nil {
-		log.Fatal(err)
+		log.Println("[ERROR] Ошибка: ", err, getLine())
 	}
 
-	return ipInfo.City, ipInfo.ISP
+	fileInfo, err := os.Stat(filename)
+	if err != nil {
+		log.Println("[ERROR] Ошибка получения информации по файлу: ", err, getLine())
+	}
+	fileModTime := fileInfo.ModTime()
+
+	if fileModTime.Before(release.PublishedAt) {
+		// Отправка GET-запроса для загрузки файла
+		resp, err := http.Get(url)
+		if err != nil {
+			log.Println("[ERROR] Ошибка отправки запроса: ", err, getLine())
+		}
+		defer resp.Body.Close()
+
+		// Создание нового файла и копирование данных из тела ответа
+		out, err := os.Create(filename)
+		if err != nil {
+			log.Println("[ERROR] Ошибка: ", err, getLine())
+		}
+		defer out.Close()
+
+		_, err = io.Copy(out, resp.Body)
+		if err != nil {
+			log.Println("[ERROR] Ошибка замены файлов: ", err, getLine())
+		} else {
+			log.Printf("[INFO] Файл %s обновлен\n", filename)
+			z++
+		}
+	} else {
+		log.Printf("[INFO] Файл %s уже обновлен\n", filename)
+		z = 0
+	}
+	return z
 }
+
+// перезапуск приложения
+func restart() {
+	// Получаем путь к текущему исполняемому файлу
+	execPath, err := os.Executable()
+	if err != nil {
+		log.Println(err, getLine())
+	}
+
+	// Запускаем новый экземпляр приложения с помощью os/exec
+	cmd := exec.Command(execPath)
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+
+	// Запускаем новый процесс и не ждем его завершения
+	err = cmd.Start()
+	if err != nil {
+		log.Println(err, getLine())
+	}
+
+	// Завершаем текущий процесс
+	os.Exit(0)
+}
+
+// func ipInf(ip string) (string, string) {
+// 	apiURL := fmt.Sprintf("https://ipinfo.io/%s/json", ip)
+
+// 	resp, err := http.Get(apiURL)
+// 	if err != nil {
+// 		log.Fatal(err)
+// 	}
+// 	defer resp.Body.Close()
+
+// 	var ipInfo IPInfoResponse
+// 	err = json.NewDecoder(resp.Body).Decode(&ipInfo)
+// 	if err != nil {
+// 		log.Fatal(err)
+// 	}
+
+// 	return ipInfo.City, ipInfo.ISP
+// }
