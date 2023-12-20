@@ -244,7 +244,7 @@ func main() {
 			var city, region, asn string = "", "", ""
 
 			comment := strings.ReplaceAll(data.Sessions[i].Comment, `,`, ".")
-			comment = strings.ReplaceAll(comment, "\n", "")
+			comment = strings.ReplaceAll(comment, "\n", ".")
 			sessionOn, _ := dateTimeS(data.Sessions[i].Created_on)
 			game, _ := keyValFile(data.Sessions[i].Product_id, "gamesID.txt")
 			idsession := data.Sessions[i].Uuid
